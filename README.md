@@ -1,29 +1,72 @@
-# Turbocharger
+Just a small gem to limit API requests rates to third-party services (or anything else that requires rate limiting). Allows you to use APIs at their maximum allowed request rates.
 
-TODO: Write a gem description
+=== USAGE
 
-## Installation
+  configuration = Turbocharger::Configuration.load_yaml("turbocharger.yml")
 
-Add this line to your application's Gemfile:
+  service = {
+    "name"       => "dummybook"
+    "limit"      => 600,
+    "period"     => 600,
+    "batch_time" => 1
+  }
 
-    gem 'turbocharger'
+  rate_limiter = Turbocharger::Service.new(service, configuration)
 
-And then execute:
+  rate_limiter.with_rate_limited do
+    DummyService.callSomething
+  end
 
-    $ bundle
+Configuration options:
 
-Or install it yourself as:
+* *name* - name of your service (requests are limited per service)
+* *limit* - maximum number of requests per time
+* *period* - period of time, when given event is blocking others
+* *batch_time* - granularity for storing events in seconds(lower batch time, more memory is needed; increasing this value reduces accurancy, most APIs however should use value "1")
 
-    $ gem install turbocharger
+=== REQUIRES
 
-## Usage
+  ruby >= 1.9.3 (might work on all versions >= 1.9.0, not tested)
+  rubygems
+  Redis server
 
-TODO: Write usage instructions here
+=== TESTING
 
-## Contributing
+  $ bundle exec rspec
 
-1. Fork it
-2. Create your feature branch (`git checkout -b my-new-feature`)
-3. Commit your changes (`git commit -am 'Add some feature'`)
-4. Push to the branch (`git push origin my-new-feature`)
-5. Create new Pull Request
+=== ALGORITHM
+
+timestamp - time represented as integer
+bucket size - period / granularity (batch_time)
+time offset - distance of time [seconds] from beginning of bucket to timestamp (eg. timestamp modulo bucket size)
+
+==== Logging events
+
+1. take event timestamp, divide it by bucket size and take floor
+2. build key by joining service identifier and value from step one, separated by colon (i.e. "dummybook:2310624")
+3. check if given key exists
+4. in redis hash specified by key, increment value at time offset by 1
+5. set hash (object stored at key) to expire at 2*bucket size if did not exist before
+
+==== Checking if allowed to publish
+
+1. calculate sum at current bucket (it is stored at key defined in step 2 of logging events)
+2. calculate sum at previous bucket ( eg. at key service_name:(current_bucket - 1) ), but take only events that occured after time offset
+3. sum values at (1) and (2)
+4. if sum is lower than limit - allow event to happen
+
+==== Main algorithm
+
+Just a loop - wait until allowed to publish, then log event and yield the code block that it rate-limited. If time exceeded - raise an exception
+
+=== Final remarks
+
+Solution is partly based on idea described at: https://chris6f.com/rate-limiting-with-redis (algorithm is somehow different).
+
+Also, there are some other gems for API calls limiting out there, but usually they lack flexibility or they are not vertically scalable (e.g. you cannot share limits across servers). By contrast, this solution should also work for distributed architectures - one just need to make sure that all parts of internal infrastructure use the same redis instance for throttling calls, and external service identifiers do match.
+
+
+=== TODO
+
+* With small change in RedisBackend#allow_event? method, one could optimise this solution, by limiting the number of server reads. If the return value of this method is changed to be either true or amount of seconds that are left to next call, sleep operation in main loop would wait until the api is free, rather than currently hard-coded 1 second. Therefore, you save execution time (number of Redis calls) on calculating result of allow_event?.
+* serious QAing
